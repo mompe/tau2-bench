@@ -291,3 +291,38 @@ class TestCombinedResponse:
         assert (
             len([e for e in events if isinstance(e, GeminiFunctionCallDoneEvent)]) == 1
         )
+
+
+# =============================================================================
+# Input audio transcription config (en-US default language hint)
+# =============================================================================
+
+
+class TestInputAudioTranscriptionConfig:
+    """Verify input_audio_transcription language_codes defaults to en-US and serializes."""
+
+    def test_default_language_codes(self):
+        """DEFAULT_GEMINI_TRANSCRIPTION_LANGUAGE_CODES defaults to en-US."""
+        from tau2.config import DEFAULT_GEMINI_TRANSCRIPTION_LANGUAGE_CODES
+
+        assert DEFAULT_GEMINI_TRANSCRIPTION_LANGUAGE_CODES == ["en-US"]
+
+    def test_live_converter_serialization(self):
+        """types.AudioTranscriptionConfig(language_codes=['en-US']) serializes in Live setup."""
+        from google.genai import _live_converters, types
+        from tau2.voice.audio_native.gemini.provider import GeminiLiveProvider
+
+        class _DummyClient:
+            vertexai = False
+
+        provider = GeminiLiveProvider(api_key="test-key")
+        assert provider.transcription_language_codes == ["en-US"]
+        cfg = types.AudioTranscriptionConfig(
+            language_codes=provider.transcription_language_codes
+        )
+        params = types.LiveConnectParameters(
+            model="models/gemini-3.8-live-extended-thinking",
+            config=types.LiveConnectConfig(input_audio_transcription=cfg),
+        ).model_dump(exclude_none=True)
+        res = _live_converters._LiveConnectParameters_to_mldev(_DummyClient(), params)
+        assert res["setup"]["inputAudioTranscription"]["language_codes"] == ["en-US"]

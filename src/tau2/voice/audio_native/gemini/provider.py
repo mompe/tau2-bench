@@ -19,6 +19,7 @@ from tau2.config import (
     DEFAULT_GEMINI_MODEL,
     DEFAULT_GEMINI_OUTPUT_SAMPLE_RATE,
     DEFAULT_GEMINI_PROACTIVE_AUDIO,
+    DEFAULT_GEMINI_TRANSCRIPTION_LANGUAGE_CODES,
     DEFAULT_GEMINI_VOICE,
 )
 from tau2.environment.tool import Tool
@@ -127,11 +128,6 @@ class GeminiLiveProvider:
         return not GeminiLiveProvider._is_gemini_31(model)
 
     @staticmethod
-    def _supports_input_audio_transcription(model: str) -> bool:
-        """Return whether the given Gemini model supports input transcription."""
-        return not GeminiLiveProvider._is_gemini_31(model)
-
-    @staticmethod
     def _uses_eap_input_path(model: str) -> bool:
         """Return whether the model should use the Gemini 3.1 input path."""
         return GeminiLiveProvider._is_gemini_31(model)
@@ -146,6 +142,7 @@ class GeminiLiveProvider:
         use_raw_json_schema: bool = True,
         max_resumptions: int = 3,
         resume_only_on_timeout: bool = True,
+        transcription_language_codes: Optional[List[str]] = None,
     ):
         """Initialize the Gemini Live provider.
 
@@ -278,6 +275,11 @@ class GeminiLiveProvider:
             )
 
         self.reasoning_effort = reasoning_effort
+        self.transcription_language_codes = (
+            transcription_language_codes
+            if transcription_language_codes is not None
+            else list(DEFAULT_GEMINI_TRANSCRIPTION_LANGUAGE_CODES)
+        )
 
         self._client = None
         self._session = None
@@ -462,12 +464,14 @@ class GeminiLiveProvider:
                         f"({self._resumption_count}/{self._max_resumptions})"
                     )
 
-            # Gemini 3.1 audio EAP currently supports output transcription only.
-            if vad_config.enable_input_transcription and (
-                self._supports_input_audio_transcription(self.model)
-            ):
+            # Enable input audio transcription with default language hint (en-US).
+            if vad_config.enable_input_transcription:
                 config_kwargs["input_audio_transcription"] = (
-                    types.AudioTranscriptionConfig()
+                    types.AudioTranscriptionConfig(
+                        language_codes=self.transcription_language_codes
+                    )
+                    if self.transcription_language_codes
+                    else types.AudioTranscriptionConfig()
                 )
 
             # Always enable output audio transcription to get text of what Gemini says
