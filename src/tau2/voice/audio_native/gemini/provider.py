@@ -128,11 +128,6 @@ class GeminiLiveProvider:
         return not GeminiLiveProvider._is_gemini_31(model)
 
     @staticmethod
-    def _supports_input_audio_transcription(model: str) -> bool:
-        """Return whether the given Gemini model supports input transcription."""
-        return not GeminiLiveProvider._is_gemini_31(model)
-
-    @staticmethod
     def _uses_eap_input_path(model: str) -> bool:
         """Return whether the model should use the Gemini 3.1 input path."""
         return GeminiLiveProvider._is_gemini_31(model)
@@ -478,10 +473,8 @@ class GeminiLiveProvider:
                         f"({self._resumption_count}/{self._max_resumptions})"
                     )
 
-            # Gemini 3.1 audio EAP currently supports output transcription only.
-            if vad_config.enable_input_transcription and (
-                self._supports_input_audio_transcription(self.model)
-            ):
+            # Enable input audio transcription with default language hint (en-US).
+            if vad_config.enable_input_transcription:
                 config_kwargs["input_audio_transcription"] = (
                     types.AudioTranscriptionConfig(
                         language_codes=self.transcription_language_codes

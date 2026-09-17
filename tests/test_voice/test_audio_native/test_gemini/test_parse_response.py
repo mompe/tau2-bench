@@ -337,7 +337,7 @@ class TestInputAudioTranscriptionConfig:
             ),
             ("gemini-2.5-flash-native-audio-preview-12-2025", [], True, []),
             ("gemini-2.5-flash-native-audio-preview-12-2025", None, False, None),
-            ("gemini-3.1-flash-live-preview", None, True, None),
+            ("gemini-3.1-flash-live-preview", None, True, ["en-US"]),
         ],
         ids=["default", "override", "auto-detect", "disabled", "gemini-3.1"],
     )
