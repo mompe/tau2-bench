@@ -128,6 +128,11 @@ class GeminiLiveProvider:
         return not GeminiLiveProvider._is_gemini_31(model)
 
     @staticmethod
+    def _supports_input_audio_transcription(model: str) -> bool:
+        """Return whether the given Gemini model supports input transcription."""
+        return not GeminiLiveProvider._is_gemini_31(model)
+
+    @staticmethod
     def _uses_eap_input_path(model: str) -> bool:
         """Return whether the model should use the Gemini 3.1 input path."""
         return GeminiLiveProvider._is_gemini_31(model)
@@ -139,6 +144,7 @@ class GeminiLiveProvider:
         reasoning_effort: Optional[str] = None,
         project_id: Optional[str] = None,
         location: Optional[str] = None,
+        input_sample_rate: Optional[int] = None,
         use_raw_json_schema: bool = True,
         max_resumptions: int = 3,
         resume_only_on_timeout: bool = True,
@@ -157,6 +163,8 @@ class GeminiLiveProvider:
             project_id: Google Cloud project ID for Vertex AI. Reads from
                 GOOGLE_CLOUD_PROJECT env var if not provided.
             location: Google Cloud region for Vertex AI. Defaults to us-central1.
+            input_sample_rate: Input audio sample rate in Hz. If None, defaults
+                to GEMINI_INPUT_SAMPLE_RATE (8000).
             use_raw_json_schema: If True (default), pass tool schemas directly
                 using parametersJsonSchema (lets SDK handle $ref/$defs).
                 If False, manually resolve $ref/$defs before passing.
@@ -167,6 +175,9 @@ class GeminiLiveProvider:
                 when the connection closes due to the planned ~10 minute timeout
                 (indicated by a GoAway message). If False, attempt resumption
                 on any connection close.
+            transcription_language_codes: BCP-47 language hints for input audio
+                transcription. Defaults to DEFAULT_GEMINI_TRANSCRIPTION_LANGUAGE_CODES.
+                Pass an empty list to use automatic language detection.
 
         Raises:
             ValueError: If no credentials are available.
@@ -280,6 +291,7 @@ class GeminiLiveProvider:
             if transcription_language_codes is not None
             else list(DEFAULT_GEMINI_TRANSCRIPTION_LANGUAGE_CODES)
         )
+        self.input_sample_rate = input_sample_rate or GEMINI_INPUT_SAMPLE_RATE
 
         self._client = None
         self._session = None
@@ -450,7 +462,9 @@ class GeminiLiveProvider:
                 # Enable context window compression for long sessions.
                 # Leave parameters unset so the API uses model-dependent defaults.
                 config_kwargs["context_window_compression"] = (
-                    types.ContextWindowCompressionConfig()
+                    types.ContextWindowCompressionConfig(
+                        sliding_window=types.SlidingWindow()
+                    )
                 )
 
             # Add session resumption config (enables receiving resumption handles)
@@ -464,8 +478,10 @@ class GeminiLiveProvider:
                         f"({self._resumption_count}/{self._max_resumptions})"
                     )
 
-            # Enable input audio transcription with default language hint (en-US).
-            if vad_config.enable_input_transcription:
+            # Gemini 3.1 audio EAP currently supports output transcription only.
+            if vad_config.enable_input_transcription and (
+                self._supports_input_audio_transcription(self.model)
+            ):
                 config_kwargs["input_audio_transcription"] = (
                     types.AudioTranscriptionConfig(
                         language_codes=self.transcription_language_codes
@@ -491,6 +507,14 @@ class GeminiLiveProvider:
                 config_kwargs["thinking_config"] = types.ThinkingConfig(
                     thinking_level=self.reasoning_effort.upper(),
                 )
+
+            config_kwargs["realtime_input_config"] = types.RealtimeInputConfig(
+                automatic_activity_detection=types.AutomaticActivityDetection(
+                    start_of_speech_sensitivity=(
+                        types.StartSensitivity.START_SENSITIVITY_HIGH
+                    ),
+                )
+            )
 
             config = types.LiveConnectConfig(**config_kwargs)
 
@@ -614,6 +638,24 @@ class GeminiLiveProvider:
             logger.error(f"Session resumption failed: {e}")
             return False
 
+    def _goaway_deadline_elapsed(self) -> bool:
+        """Whether a GoAway deadline has passed without the receive loop acting.
+
+        The receive loop only re-checks `_reconnect_deadline` when a response
+        arrives (it is otherwise blocked in `async for response in turn`). If
+        the server goes silent after sending GoAway, that check never runs and
+        the reconnection window is missed entirely. The adapter polls this from
+        its own tick loop, which keeps running independently of the receive
+        task, so the deadline is honored either way.
+        """
+        if not self._reconnect_at_turn_boundary or self._reconnect_deadline is None:
+            return False
+        try:
+            now = asyncio.get_running_loop().time()
+        except RuntimeError:  # no running loop (called from sync context)
+            return False
+        return now >= self._reconnect_deadline
+
     @property
     def needs_reconnection(self) -> bool:
         """Whether a GoAway reconnection is pending.
@@ -621,7 +663,7 @@ class GeminiLiveProvider:
         The adapter should check this at the start of each tick and call
         perform_pending_reconnection() before any session I/O.
         """
-        return self._pending_reconnection
+        return self._pending_reconnection or self._goaway_deadline_elapsed()
 
     async def perform_pending_reconnection(self) -> bool:
         """Perform a pending GoAway reconnection.
@@ -634,7 +676,17 @@ class GeminiLiveProvider:
             True if reconnection succeeded, False otherwise.
         """
         if not self._pending_reconnection:
-            return True
+            if not self._goaway_deadline_elapsed():
+                return True
+            # GoAway deadline expired while the receive loop sat blocked on a
+            # silent server. Take over the reconnection here.
+            logger.warning(
+                "GoAway deadline elapsed without the receive loop reacting "
+                "(server silent); forcing reconnection at tick boundary"
+            )
+            self._reconnect_at_turn_boundary = False
+            self._reconnect_deadline = None
+            self._pending_reconnection = True
 
         self._pending_reconnection = False
 
@@ -1036,7 +1088,7 @@ class GeminiLiveProvider:
 
         audio_blob = types.Blob(
             data=audio_data,
-            mime_type=f"audio/pcm;rate={GEMINI_INPUT_SAMPLE_RATE}",
+            mime_type=f"audio/pcm;rate={self.input_sample_rate}",
         )
         await self._session.send_realtime_input(audio=audio_blob)
         logger.debug(f"Sent {len(audio_data)} bytes of audio")

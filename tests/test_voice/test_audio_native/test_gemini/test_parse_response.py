@@ -11,6 +11,9 @@ Uses SimpleNamespace mocks -- no real API calls needed.
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
+
+import pytest
 
 from tau2.voice.audio_native.gemini.events import (
     GeminiAudioDeltaEvent,
@@ -23,7 +26,7 @@ from tau2.voice.audio_native.gemini.events import (
     GeminiTurnCompleteEvent,
     GeminiUnknownEvent,
 )
-from tau2.voice.audio_native.gemini.provider import GeminiLiveProvider
+from tau2.voice.audio_native.gemini.provider import GeminiLiveProvider, GeminiVADConfig
 
 # =============================================================================
 # Helpers
@@ -293,11 +296,6 @@ class TestCombinedResponse:
         )
 
 
-# =============================================================================
-# Input audio transcription config (en-US default language hint)
-# =============================================================================
-
-
 class TestInputAudioTranscriptionConfig:
     """Verify input_audio_transcription language_codes defaults to en-US and serializes."""
 
@@ -310,7 +308,6 @@ class TestInputAudioTranscriptionConfig:
     def test_live_converter_serialization(self):
         """types.AudioTranscriptionConfig(language_codes=['en-US']) serializes in Live setup."""
         from google.genai import _live_converters, types
-        from tau2.voice.audio_native.gemini.provider import GeminiLiveProvider
 
         class _DummyClient:
             vertexai = False
@@ -326,3 +323,89 @@ class TestInputAudioTranscriptionConfig:
         ).model_dump(exclude_none=True)
         res = _live_converters._LiveConnectParameters_to_mldev(_DummyClient(), params)
         assert res["setup"]["inputAudioTranscription"]["language_codes"] == ["en-US"]
+
+    @pytest.mark.parametrize("vertexai", [False, True])
+    @pytest.mark.parametrize(
+        "model,language_codes,enabled,expected",
+        [
+            ("gemini-2.5-flash-native-audio-preview-12-2025", None, True, ["en-US"]),
+            (
+                "gemini-2.5-flash-native-audio-preview-12-2025",
+                ["fr-FR"],
+                True,
+                ["fr-FR"],
+            ),
+            ("gemini-2.5-flash-native-audio-preview-12-2025", [], True, []),
+            ("gemini-2.5-flash-native-audio-preview-12-2025", None, False, None),
+            ("gemini-3.1-flash-live-preview", None, True, None),
+        ],
+        ids=["default", "override", "auto-detect", "disabled", "gemini-3.1"],
+    )
+    def test_connect_transcription_config(
+        self, model, language_codes, enabled, expected, vertexai
+    ):
+        """Check the actual connection config and both SDK serialization paths."""
+        from google.genai import _live_converters, types
+
+        provider = GeminiLiveProvider(
+            api_key="test-key",
+            model=model,
+            transcription_language_codes=language_codes,
+        )
+        session_manager = AsyncMock()
+        connect = Mock(return_value=session_manager)
+        provider._client = SimpleNamespace(
+            aio=SimpleNamespace(live=SimpleNamespace(connect=connect))
+        )
+
+        async def connect_and_disconnect():
+            await provider.connect(
+                system_prompt="Test instructions",
+                tools=[],
+                vad_config=GeminiVADConfig(enable_input_transcription=enabled),
+            )
+            await provider.disconnect()
+
+        asyncio.run(connect_and_disconnect())
+        config = connect.call_args.kwargs["config"]
+        converter = (
+            _live_converters._LiveConnectParameters_to_vertex
+            if vertexai
+            else _live_converters._LiveConnectParameters_to_mldev
+        )
+        params = types.LiveConnectParameters(model=model, config=config).model_dump(
+            exclude_none=True
+        )
+        setup = converter(SimpleNamespace(vertexai=vertexai), params)["setup"]
+        if expected is None:
+            assert config.input_audio_transcription is None
+            assert "inputAudioTranscription" not in setup
+        else:
+            assert (config.input_audio_transcription.language_codes or []) == expected
+            assert (
+                setup["inputAudioTranscription"].get("language_codes", []) == expected
+            )
+
+
+class TestGeminiInputSampleRate:
+    """Test Gemini input sample rate configuration."""
+
+    def test_adapter_default_8khz(self):
+        """DiscreteTimeGeminiAdapter defaults to 8000 Hz input sample rate."""
+        from tau2.voice.audio_native.gemini.discrete_time_adapter import (
+            DiscreteTimeGeminiAdapter,
+        )
+
+        adapter = DiscreteTimeGeminiAdapter(tick_duration_ms=200)
+        assert adapter.input_sample_rate == 8000
+
+    def test_adapter_explicit_16khz(self):
+        """DiscreteTimeGeminiAdapter accepts an explicit 16000 Hz input sample rate."""
+        from tau2.voice.audio_native.gemini.discrete_time_adapter import (
+            DiscreteTimeGeminiAdapter,
+        )
+
+        adapter = DiscreteTimeGeminiAdapter(
+            tick_duration_ms=200, input_sample_rate=16000
+        )
+        assert adapter.input_sample_rate == 16000
